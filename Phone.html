@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KeyParcel / 手机发送</title>
+<style>
+  :root{--ink:#1c191f;--canvas:#fff;--muted:#645b68;--edge:#e7dee8;--accent:#7d27a1;--field:#faf7fb}
+  *{box-sizing:border-box} body{margin:0;background:var(--canvas);color:var(--ink);
+    font:16px/1.55 "PingFang SC","Microsoft YaHei UI",system-ui,sans-serif}
+  main{max-width:510px;margin:auto;padding:24px 20px}
+  header{display:flex;align-items:center;gap:14px;padding:14px 0 22px}
+  .mark{flex:none;display:grid;place-items:center;width:46px;height:46px;
+    background:linear-gradient(145deg,#f37459,#c6398b 55%,#7d27a1);
+    color:#fff;border-radius:14px;font:bold 30px/1 system-ui}
+  h1{font:700 29px/1.15 "Segoe UI",system-ui;margin:0} header p{font-size:13px;margin:4px 0 0;color:var(--muted)}
+  form{padding:0} label{display:block;font-weight:700;margin-bottom:8px}
+  textarea,button{width:100%;font:inherit;color:inherit}
+  textarea{display:block;min-height:15rem;padding:13px;background:var(--field);border:1px solid var(--edge);
+    border-radius:14px;resize:vertical}
+  textarea:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  button{margin-top:14px;min-height:48px;background:var(--accent);color:white;border:0;border-radius:11px;font-weight:700}
+  button:disabled{opacity:.55} #status{min-height:3.5em;margin:0;padding:13px 0 10px;color:var(--muted)}
+  footer{padding:12px 0;border-top:1px solid var(--edge);color:var(--muted);font-size:12px}
+  footer a{color:var(--accent);text-decoration:none} footer a:hover{text-decoration:underline}
+</style>
+<main>
+  <header><div class="mark" aria-hidden="true">↳</div><div><h1>KeyParcel</h1><p>把手机上的文字接到电脑</p></div></header>
+  <form id="form">
+    <label for="text">待发送的文字</label>
+    <textarea id="text" placeholder="在这里输入或粘贴"></textarea>
+    <button id="send" type="submit" disabled>发送到电脑</button>
+  </form>
+  <p id="status" role="status">正在连接…</p>
+  <footer><a href="https://wenhao.li/" target="_blank" rel="noopener noreferrer">By:0x3fffff</a></footer>
+</main>
+<script>
+  const form = document.getElementById('form'), input = document.getElementById('text');
+  const send = document.getElementById('send'), status = document.getElementById('status');
+  const storageKey = 'keyparcel-phone-token';
+  let token = '';
+  async function post(path, credential, body) {
+    return fetch(path, {method:'POST', cache:'no-store',
+      headers:{'Authorization':'Bearer ' + credential, 'Content-Type':'text/plain;charset=UTF-8'},
+      body:body || ''});
+  }
+  async function connect() {
+    const code = location.hash.slice(1);
+    try {
+      if (code) {
+        const response = await post('/pair', code);
+        if (response.ok) {
+          token = await response.text();
+          try { localStorage.setItem(storageKey, token); } catch (_) {}
+          history.replaceState(null, '', '/');
+        } else {
+          status.textContent = '配对码已失效，请在电脑上生成新码后重扫。';
+          return;
+        }
+      } else {
+        try { token = localStorage.getItem(storageKey) || ''; } catch (_) {}
+      }
+      if (!token || !(await post('/check', token)).ok) {
+        status.textContent = '请先扫描电脑上的配对二维码。';
+        return;
+      }
+      status.textContent = '已连接，可以发送。';
+      send.disabled = false;
+    } catch (_) { status.textContent = '连接失败，请确认电脑已开启接收，再刷新页面。'; }
+  }
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!token || send.disabled) return;
+    const value = input.value;
+    if (!value.length) { status.textContent = '请输入要发送的文字。'; return; }
+    if (new TextEncoder().encode(value).length > 32768) {
+      status.textContent = '文字过长，请分段发送（每次最多 32 KB）。'; return;
+    }
+    send.disabled = true;
+    try {
+      const response = await post('/text', token, value);
+      if (response.status === 403) {
+        token = '';
+        status.textContent = '配对已失效，请重新扫码。';
+      } else if (response.ok) {
+        status.textContent = '电脑已收到。按电脑上的 KeyParcel 主快捷键输入。';
+      } else {
+        status.textContent = '电脑未接收，请重试。';
+      }
+    } catch (_) { status.textContent = '发送失败，请检查电脑接收状态后重试。'; }
+    finally { send.disabled = !token; }
+  });
+  connect();
+</script>
+</html>
