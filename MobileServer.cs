@@ -112,7 +112,7 @@ namespace KeyParcel
 
     internal sealed class MobileServer : IDisposable
     {
-        internal const int Port = 8765;
+        internal const int PreferredPort = 8765;
         private const int MaxTextBytes = 32768;
         private const int MaxHeaderBytes = 8192;
         private const int RequestTimeoutMs = 6000;
@@ -125,6 +125,7 @@ namespace KeyParcel
         private readonly HashSet<TcpClient> clients = new HashSet<TcpClient>();
         private bool closed;
         internal string Address { get { return "http://" + authority; } }
+        internal int ListeningPort { get; private set; }
 
         internal MobileServer(IPAddress ip, int port, MobileInbox inbox)
         {
@@ -135,12 +136,35 @@ namespace KeyParcel
                 resource.CopyTo(buffer);
                 page = buffer.ToArray();
             }
-            listener = new TcpListener(ip, port);
-            listener.ExclusiveAddressUse = true;
-            listener.Start(8);
-            authority = ((IPEndPoint)listener.LocalEndpoint).ToString();
+            try { listener = Bind(ip, port); }
+            catch (SocketException error)
+            {
+                if (port == 0 || (error.SocketErrorCode != SocketError.AddressAlreadyInUse &&
+                    error.SocketErrorCode != SocketError.AccessDenied)) throw;
+                // Port zero lets Windows select and reserve a free port in a single operation.
+                listener = Bind(ip, 0);
+            }
+            var endpoint = (IPEndPoint)listener.LocalEndpoint;
+            ListeningPort = endpoint.Port;
+            authority = endpoint.ToString();
             var acceptor = new Thread(AcceptConnections) { IsBackground = true, Name = "KeyParcel LAN" };
             acceptor.Start();
+        }
+
+        private static TcpListener Bind(IPAddress ip, int port)
+        {
+            var candidate = new TcpListener(ip, port);
+            try
+            {
+                candidate.ExclusiveAddressUse = true;
+                candidate.Start(8);
+                return candidate;
+            }
+            catch
+            {
+                candidate.Server.Close();
+                throw;
+            }
         }
 
         private void AcceptConnections()

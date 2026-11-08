@@ -1,4 +1,4 @@
-param([string]$Output = (Join-Path $PSScriptRoot 'dist/1.3/KeyParcel.exe'))
+param([string]$Output = (Join-Path $PSScriptRoot 'dist/1.3.1/KeyParcel.exe'))
 
 $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'

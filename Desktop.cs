@@ -16,7 +16,7 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("局域网文字接力")]
 [assembly: AssemblyCompany("0x3fffff")]
 [assembly: AssemblyCopyright("Copyright © 2026 0x3fffff")]
-[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.3.1.0")]
 
 namespace KeyParcel
 {
@@ -413,9 +413,9 @@ namespace KeyParcel
 
         private void StartReceiver(IPAddress ip)
         {
-            receiver = new MobileServer(ip, MobileServer.Port, inbox);
+            receiver = new MobileServer(ip, MobileServer.PreferredPort, inbox);
             lastAddress = ip;
-            if (!inbox.Paired) inbox.NewCode();
+            if (!inbox.Paired || receiver.ListeningPort != MobileServer.PreferredPort) inbox.NewCode();
         }
 
         private void StopReceiver()
@@ -582,7 +582,7 @@ namespace KeyParcel
                 var choice = adapters.SelectedItem as AddressChoice;
                 if (choice == null) return;
                 try { start(choice.Ip); }
-                catch (SocketException) { error = "无法开启接收。请检查网卡和端口 8765。"; }
+                catch (SocketException) { error = "无法开启接收。请检查所选网卡的地址是否可用。"; }
             }
             UpdateState();
         }

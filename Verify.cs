@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -35,8 +36,27 @@ namespace KeyParcel
             });
             CheckLayouts(() => new PairingWindow(inbox, () => null, _ => { }, () => { }, IPAddress.Loopback),
                 work, "pairing-off");
-            using (var receiver = new MobileServer(IPAddress.Loopback, 0, inbox))
+            int testPort;
+            using (var occupied = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
             {
+                occupied.ExclusiveAddressUse = true;
+                occupied.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                occupied.Listen(1);
+                testPort = ((IPEndPoint)occupied.LocalEndPoint).Port;
+                VerifyReceiver(work, inbox, testPort);
+            }
+            using (var preferred = new MobileServer(IPAddress.Loopback, testPort, inbox))
+                Require(preferred.ListeningPort == testPort, "A free preferred port was not used.");
+            VerifyInput();
+        }
+
+        private static void VerifyReceiver(string work, MobileInbox inbox, int occupiedPort)
+        {
+            using (var receiver = new MobileServer(IPAddress.Loopback, occupiedPort, inbox))
+            {
+                Require(receiver.ListeningPort != occupiedPort &&
+                    new Uri(receiver.Address).Port == receiver.ListeningPort,
+                    "An occupied port did not fall back to an available port in the advertised URL.");
                 inbox.NewCode();
                 var code = inbox.PairCode;
                 CheckLayouts(() => new PairingWindow(inbox, () => receiver, _ => { }, () => { }, IPAddress.Loopback),
@@ -58,6 +78,10 @@ namespace KeyParcel
                 inbox.Forget();
                 Require(Request(url, "/check", token, "", out response) == 403, "Revoked phone could still connect.");
             }
+        }
+
+        private static void VerifyInput()
+        {
             var units = new List<string>();
             var window = new IntPtr(1);
             var timer = Stopwatch.StartNew();
