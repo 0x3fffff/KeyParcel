@@ -7,11 +7,11 @@ if (!(Test-Path -LiteralPath $compiler)) {
 }
 $page = Join-Path $PSScriptRoot 'Phone.html'
 $exe = Join-Path $folder 'Verify.exe'
-$sources = 'Desktop.cs','WindowsInput.cs','MobileQr.cs','MobileServer.cs','Verify.cs' |
+$sources = 'Desktop.cs','WindowsInput.cs','MobileQr.cs','MobileServer.cs','QuickText.cs','Verify.cs' |
     ForEach-Object { Join-Path $PSScriptRoot $_ }
 $arguments = @('/nologo', '/main:KeyParcel.Verify', '/codepage:65001', "/out:$exe",
     "/resource:$page,KeyParcel.Phone.html", '/reference:System.Windows.Forms.dll',
-    '/reference:System.Drawing.dll', '/reference:System.Core.dll')
+    '/reference:System.Drawing.dll', '/reference:System.Core.dll', '/reference:System.Runtime.Serialization.dll')
 & $compiler @arguments @sources
 if ($LASTEXITCODE) { throw 'Verification build failed.' }
 & $exe $folder

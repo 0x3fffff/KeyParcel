@@ -1,4 +1,4 @@
-param([string]$Output = (Join-Path $PSScriptRoot 'dist/1.3.1/KeyParcel.exe'))
+param([string]$Output = (Join-Path $PSScriptRoot 'dist/1.4.1/KeyParcel.exe'))
 
 $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
@@ -11,11 +11,12 @@ New-Item -ItemType Directory -Force -Path (Split-Path $Output -Parent) | Out-Nul
 $page = Join-Path $PSScriptRoot 'Phone.html'
 $icon = Join-Path $PSScriptRoot 'KeyParcel.ico'
 $manifest = Join-Path $PSScriptRoot 'KeyParcel.manifest'
-$sources = 'Desktop.cs','WindowsInput.cs','MobileQr.cs','MobileServer.cs' |
+$sources = 'Desktop.cs','WindowsInput.cs','MobileQr.cs','MobileServer.cs','QuickText.cs' |
     ForEach-Object { Join-Path $PSScriptRoot $_ }
 $arguments = @('/nologo', '/target:winexe', '/platform:anycpu', '/optimize+', '/codepage:65001',
     "/out:$Output", "/resource:$page,KeyParcel.Phone.html", "/win32icon:$icon", "/win32manifest:$manifest",
-    '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Core.dll')
+    '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Core.dll',
+    '/reference:System.Runtime.Serialization.dll')
 & $compiler @arguments @sources
 if ($LASTEXITCODE) { throw 'Compilation failed.' }
 Get-Item -LiteralPath $Output

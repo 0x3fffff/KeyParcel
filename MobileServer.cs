@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -13,6 +15,9 @@ namespace KeyParcel
 {
     internal sealed class MobileInbox
     {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool MoveFileEx(string source, string destination, uint flags);
+        private const uint ReplaceExisting = 0x1, WriteThrough = 0x8;
         private readonly string credentialFile;
         private readonly object gate = new object();
         private string credential, pairCode, latest;
@@ -88,8 +93,8 @@ namespace KeyParcel
             try
             {
                 File.WriteAllText(temp, value, new UTF8Encoding(false));
-                if (File.Exists(path)) File.Replace(temp, path, null);
-                else File.Move(temp, path);
+                if (!MoveFileEx(temp, path, ReplaceExisting | WriteThrough))
+                    throw new IOException("Could not replace the settings file.", new Win32Exception(Marshal.GetLastWin32Error()));
             }
             finally { File.Delete(temp); }
         }

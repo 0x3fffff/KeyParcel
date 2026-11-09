@@ -22,7 +22,21 @@ namespace KeyParcel
         private static extern int SetWindowLong(IntPtr window, int index, int value);
 
         [STAThread]
-        private static void Main(string[] args)
+        private static int Main(string[] args)
+        {
+            try
+            {
+                Run(args);
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(error.Message);
+                return 1;
+            }
+        }
+
+        private static void Run(string[] args)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -48,6 +62,83 @@ namespace KeyParcel
             using (var preferred = new MobileServer(IPAddress.Loopback, testPort, inbox))
                 Require(preferred.ListeningPort == testPort, "A free preferred port was not used.");
             VerifyInput();
+            VerifyShortcutRecording();
+            VerifyQuickText(work);
+        }
+
+        private static void VerifyQuickText(string work)
+        {
+            string folder = Path.Combine(work, "quick-text-test");
+            var store = new QuickTextStore(folder);
+            Require(!store.Enabled && store.Entries.Count == 0, "New quick-text settings should start empty.");
+            using (var dialog = new QuickTextWindow(store, _ => true))
+            {
+                Capture(dialog, Path.Combine(work, "quick-text-empty.png"), 100);
+                var controls = Descendants(dialog).ToList();
+                var add = controls.OfType<Button>().Single(button => button.Text == "新增条目");
+                var delete = controls.OfType<Button>().Single(button => button.Text == "删除");
+                var save = controls.OfType<Button>().Single(button => button.Text == "保存条目");
+                var list = controls.OfType<ListBox>().Single();
+                add.PerformClick();
+                add.PerformClick();
+                Require(store.Entries.Select(entry => entry.Chord).SequenceEqual(
+                    new[] { Keys.Control | Keys.D1, Keys.Control | Keys.D2 }), "Automatic allocation did not start with Ctrl+1 and Ctrl+2. " +
+                    String.Join(" | ", controls.OfType<Label>().Select(label => label.Text)));
+                string secondId = store.Entries[1].Id;
+                controls.OfType<TextBox>().Single(box => box.AccessibleName == "条目标题").Text = "常用回复";
+                controls.OfType<TextBox>().Single(box => box.AccessibleName == "条目内容").Text = "第一行。\r\n第二行🙂";
+                save.PerformClick();
+                list.SelectedIndex = 0;
+                delete.PerformClick();
+                Require(store.Entries.Count == 1 && store.Entries[0].Id == secondId &&
+                    store.Entries[0].Chord == (Keys.Control | Keys.D2), "Deleting an entry shifted another shortcut.");
+                add.PerformClick();
+                Require(store.Entries[1].Chord == (Keys.Control | Keys.D1), "A new entry did not fill the available gap.");
+                controls.OfType<CheckBox>().Single().Checked = true;
+                Require(store.Enabled, "The quick-text switch was not saved.");
+            }
+            var restored = new QuickTextStore(folder);
+            Require(restored.Enabled && restored.Entries.Count == 2 &&
+                restored.Entries[0].Title == "常用回复" && restored.Entries[0].Text == "第一行。\r\n第二行🙂",
+                "The quick-text text or enabled state did not survive restart.");
+            Require(restored.NextChord(chord => chord != (Keys.Control | Keys.D3)) == (Keys.Control | Keys.D4),
+                "Allocation did not skip an unavailable hotkey.");
+            CheckLayouts(() => new QuickTextWindow(restored, _ => true), work, "quick-text");
+            using (var compact = new QuickTextWindow(restored, _ => true))
+            {
+                Capture(compact, Path.Combine(work, "quick-text-compact-150.png"), 150, form =>
+                {
+                    var controls = Descendants(form).ToList();
+                    var list = controls.OfType<ListBox>().Single();
+                    var body = controls.OfType<TextBox>().Single(box => box.AccessibleName == "条目内容");
+                    int listHeight = list.Height, bodyHeight = body.Height;
+                    form.ClientSize = new Size((int)(form.ClientSize.Width * .88), (int)(form.ClientSize.Height * .74));
+                    form.PerformLayout();
+                    Require(list.Height < listHeight && body.Height < bodyHeight && !form.VerticalScroll.Visible,
+                        "The compact quick-text window did not shrink its editors.");
+                });
+                CheckChildren(compact, "compact quick-text 150%");
+            }
+            restored.Save(false, restored.Entries);
+            Require(!new QuickTextStore(folder).Enabled, "Disabled state did not survive restart.");
+            Console.WriteLine("Quick-text add, edit, delete, hotkey allocation and restart state passed.");
+        }
+
+        private static void VerifyShortcutRecording()
+        {
+            using (var field = new ShortcutField(Keys.Control | Keys.Shift | Keys.V, "测试快捷键"))
+            {
+                var recorded = new List<Keys>();
+                field.Recorded += recorded.Add;
+                var command = typeof(ShortcutField).GetMethod("ProcessCmdKey", BindingFlags.Instance | BindingFlags.NonPublic);
+                foreach (Keys key in new[] { Keys.Z, Keys.A, Keys.D1, Keys.V })
+                {
+                    var message = Message.Create(field.Handle, 0x0100, (IntPtr)(int)key, IntPtr.Zero);
+                    command.Invoke(field, new object[] { message, Keys.Control | key });
+                }
+                Require(recorded.SequenceEqual(new[] { Keys.Control | Keys.Z, Keys.Control | Keys.A, Keys.Control | Keys.D1 })
+                    && field.Text == "Ctrl + 1", "Recorder lost a command key or accepted the reserved Ctrl+V.");
+            }
         }
 
         private static void VerifyReceiver(string work, MobileInbox inbox, int occupiedPort)
@@ -152,6 +243,15 @@ namespace KeyParcel
                     keys.Set(PasteShortcut.Resume, first) != null, "Hotkey conflict handling failed.");
                 Require(keys.Set(PasteShortcut.Resume, Keys.Control | Keys.Alt | Keys.Shift | Keys.F10) == null,
                     "Could not register a separate resume shortcut.");
+                string snippet = "quick:verification";
+                var snippetChord = Keys.Control | Keys.Alt | Keys.Shift | Keys.F11;
+                Require(keys.Set(snippet, snippetChord) == null, "Dynamic shortcut registration failed.");
+                keys.Suspend();
+                using (var other = new Hotkeys(_ => { }))
+                    Require(other.Set(snippet, snippetChord) == null, "The shortcut remained registered while suspended.");
+                Require(keys.Restore() == 0, "Suspended shortcuts could not be restored.");
+                keys.Remove(snippet);
+                Require(keys.CanRegister(snippetChord), "Removing an entry did not release the global shortcut.");
             }
             Console.WriteLine("Desktop layouts, receiver, pairing, Unicode input, pacing, pause/resume and shortcuts passed.");
         }
@@ -215,18 +315,19 @@ namespace KeyParcel
             }
         }
 
-        private static void Capture(Form form, string path, int percent)
+        private static void Capture(Form form, string path, int percent, Action<Form> resize = null)
         {
             form.ShowInTaskbar = false;
             form.StartPosition = FormStartPosition.Manual;
             form.Location = new Point(-30000, -30000);
+            form.MaximumSize = new Size(4096, 4096);
             SetWindowLong(form.Handle, -20, GetWindowLong(form.Handle, -20) | 0x08000000);
             form.Show();
             Application.DoEvents();
             if (percent != 100)
             {
                 // Simulate high-DPI bounds and font metrics without changing system settings.
-                int width = form.ClientSize.Width;
+                var size = form.ClientSize;
                 float factor = percent / 100f;
                 var originalFonts = Descendants(form).ToDictionary(control => control, control => control.Font);
                 form.Scale(new SizeF(factor, factor));
@@ -234,9 +335,12 @@ namespace KeyParcel
                     font => new Font(font.FontFamily, font.SizeInPoints * factor, font.Style));
                 form.Disposed += delegate { foreach (var font in scaledFonts.Values) font.Dispose(); };
                 foreach (var entry in originalFonts) entry.Key.Font = scaledFonts[entry.Value];
+                form.ClientSize = new Size((int)Math.Round(size.Width * factor), (int)Math.Round(size.Height * factor));
                 form.PerformLayout();
-                Require(form.ClientSize.Width >= width * factor - 2, "Scaled window width did not change.");
+                Require(form.ClientSize.Width >= size.Width * factor - 2, form.Text + " at " + percent +
+                    "% did not scale from " + size.Width + " to " + (size.Width * factor) + " (actual " + form.ClientSize.Width + ").");
             }
+            if (resize != null) resize(form);
             using (var image = new Bitmap(form.Width, form.Height))
             {
                 form.DrawToBitmap(image, new Rectangle(0, 0, form.Width, form.Height));

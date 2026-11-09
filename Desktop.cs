@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -16,7 +17,7 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("局域网文字接力")]
 [assembly: AssemblyCompany("0x3fffff")]
 [assembly: AssemblyCopyright("Copyright © 2026 0x3fffff")]
-[assembly: AssemblyVersion("1.3.1.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
 
 namespace KeyParcel
 {
@@ -99,6 +100,14 @@ namespace KeyParcel
             parent.Controls.Add(control, column, row);
         }
 
+        internal static void Stretch(TableLayoutPanel table, int row)
+        {
+            table.AutoSize = false;
+            table.Dock = DockStyle.Fill;
+            table.RowStyles[row].SizeType = SizeType.Percent;
+            table.RowStyles[row].Height = 100;
+        }
+
         internal static Label Label(string text, Font font, Color color)
         {
             return new Label { Text = text, Font = font, ForeColor = color, AutoSize = true,
@@ -112,7 +121,7 @@ namespace KeyParcel
                 Anchor = AnchorStyles.Left | AnchorStyles.Right };
         }
 
-        internal static Control Field(Control editor, int horizontal = 10)
+        internal static Control Field(Control editor, int horizontal = 10, bool stretch = false)
         {
             var shell = (RoundedPanel)Configure(new RoundedPanel(FieldColor, Edge, 9), new[] { 0 });
             shell.Dock = DockStyle.None;
@@ -125,6 +134,11 @@ namespace KeyParcel
             editor.LostFocus += delegate { shell.Invalidate(); };
             shell.Click += delegate { editor.Focus(); };
             Put(shell, editor, 0, 0, Padding.Empty);
+            if (stretch)
+            {
+                editor.Dock = DockStyle.Fill;
+                Stretch(shell, 0);
+            }
             return shell;
         }
 
@@ -261,14 +275,40 @@ namespace KeyParcel
         }
     }
 
+    internal sealed class ShortcutField : TextBox
+    {
+        internal event Action<Keys> Recorded;
+
+        internal ShortcutField(Keys current, string accessibleName)
+        {
+            ReadOnly = true;
+            ShortcutsEnabled = false;
+            BorderStyle = BorderStyle.None;
+            Font = Theme.Chord;
+            AccessibleName = accessibleName;
+            Text = Hotkeys.Display(current);
+        }
+
+        protected override bool ProcessCmdKey(ref Message message, Keys keyData)
+        {
+            // Capture before TextBoxBase handles commands such as Ctrl+Z and Ctrl+A.
+            if (!Hotkeys.Valid(keyData)) return base.ProcessCmdKey(ref message, keyData);
+            Text = Hotkeys.Display(keyData);
+            if (Recorded != null) Recorded(keyData);
+            return true;
+        }
+    }
+
     internal sealed class ParcelWindow : Form
     {
         private readonly string folder;
         private readonly MobileInbox inbox;
+        private readonly QuickTextStore quickText;
         private readonly Hotkeys hotkeys;
         private readonly PacedInput input;
         private readonly NumericUpDown delay;
-        private readonly Label state, message;
+        private readonly Label state, message, quickTextState;
+        private readonly List<string> quickBindings = new List<string>();
         private readonly Timer refresh = new Timer { Interval = 400 };
         private MobileServer receiver;
         private IPAddress lastAddress;
@@ -277,7 +317,8 @@ namespace KeyParcel
         {
             this.folder = folder;
             inbox = new MobileInbox(folder);
-            Theme.Window(this, "KeyParcel", 516, 460);
+            quickText = new QuickTextStore(folder);
+            Theme.Window(this, "KeyParcel", 516, 514);
             var root = Theme.Table(0);
             root.Padding = new Padding(24, 19, 24, 12);
             Controls.Add(root);
@@ -308,17 +349,25 @@ namespace KeyParcel
                 RefreshState();
             };
 
-            Theme.Put(root, Theme.Label("全局快捷键", Theme.Section, Theme.Ink), 0, 3, new Padding(0, 0, 0, 8));
+            var quickRow = Theme.Table(0, -1);
+            quickTextState = Theme.Label("", Theme.Body, Theme.Muted);
+            Theme.Put(quickRow, quickTextState, 0, 0, new Padding(0, 0, 8, 0));
+            var manage = Theme.Button("管理快捷文本");
+            manage.Click += delegate { OpenQuickText(); };
+            Theme.Put(quickRow, manage, 1, 0, Padding.Empty);
+            Theme.Put(root, quickRow, 0, 3, new Padding(0, 0, 0, 15));
+
+            Theme.Put(root, Theme.Label("全局快捷键", Theme.Section, Theme.Ink), 0, 4, new Padding(0, 0, 0, 8));
             var shortcuts = Theme.Table(126, 0, -1);
-            Theme.Put(root, shortcuts, 0, 4, new Padding(0, 0, 0, 12));
+            Theme.Put(root, shortcuts, 0, 5, new Padding(0, 0, 0, 12));
             message = Theme.Label("点击快捷键输入框可录制新组合键。", Theme.Small, Theme.Muted);
             hotkeys = new Hotkeys(Trigger);
-            AddShortcut(shortcuts, PasteShortcut.Phone, "手机文字优先", Keys.Control | Keys.Shift | Keys.V);
-            AddShortcut(shortcuts, PasteShortcut.Clipboard, "电脑剪贴板", Keys.Control | Keys.Alt | Keys.V);
-            AddShortcut(shortcuts, PasteShortcut.Resume, "继续粘贴", Keys.Control | Keys.Alt | Keys.Shift | Keys.V);
+            AddShortcut(shortcuts, 0, PasteShortcut.Phone, "手机文字优先", Keys.Control | Keys.Shift | Keys.V);
+            AddShortcut(shortcuts, 1, PasteShortcut.Clipboard, "电脑剪贴板", Keys.Control | Keys.Alt | Keys.V);
+            AddShortcut(shortcuts, 2, PasteShortcut.Resume, "继续粘贴", Keys.Control | Keys.Alt | Keys.Shift | Keys.V);
 
             var pacing = Theme.Table(-1, 0, 82, -1);
-            Theme.Put(root, pacing, 0, 5, new Padding(0, 1, 0, 8));
+            Theme.Put(root, pacing, 0, 6, new Padding(0, 1, 0, 8));
             Theme.Put(pacing, Theme.Label("字符间隔", Theme.Section, Theme.Ink), 0, 0, new Padding(0, 0, 12, 0));
             Theme.Put(pacing, Theme.Label("0 表示最快", Theme.Small, Theme.Muted), 1, 0, Padding.Empty);
             delay = new NumericUpDown { Name = "CharacterInterval", AccessibleName = "字符间隔（毫秒）",
@@ -328,39 +377,36 @@ namespace KeyParcel
             Theme.Put(pacing, Theme.Label("毫秒", Theme.Small, Theme.Muted), 3, 0, new Padding(8, 0, 0, 0));
             delay.ValueChanged += delegate { SaveDelay(); };
 
-            Theme.Put(root, message, 0, 6, new Padding(0, 6, 0, 5));
-            Theme.Put(root, Theme.AuthorLink(SetMessage), 0, 7, new Padding(0, 10, 0, 0));
+            Theme.Put(root, message, 0, 7, new Padding(0, 6, 0, 5));
+            Theme.Put(root, Theme.AuthorLink(SetMessage), 0, 8, new Padding(0, 10, 0, 0));
             input = new PacedInput(SetMessage, WindowsKeyboard.GetForegroundWindow, WindowsKeyboard.Send);
+            RefreshQuickBindings();
             refresh.Tick += delegate { RefreshState(); };
             RefreshState();
             refresh.Start();
             ResumeLayout(true);
         }
 
-        private void AddShortcut(TableLayoutPanel panel, PasteShortcut shortcut, string caption, Keys fallback)
+        private void AddShortcut(TableLayoutPanel panel, int slot, string shortcut, string caption, Keys fallback)
         {
-            int slot = (int)shortcut;
             string file = "hotkey-" + slot + ".txt";
             var current = (Keys)ReadNumber(file, (int)fallback, value => Hotkeys.Valid((Keys)value));
             string error = hotkeys.Set(shortcut, current);
             if (error != null) SetMessage(caption + "的快捷键被占用。请重新录制。");
             Theme.Put(panel, Theme.Label(caption, Theme.Body, Theme.Ink), 0, slot, new Padding(0, 0, 8, 6));
-            var box = new TextBox { ReadOnly = true, ShortcutsEnabled = false, Font = Theme.Chord,
-                BorderStyle = BorderStyle.None,
-                Text = Hotkeys.Display(current), AccessibleName = caption + "快捷键" };
+            var box = new ShortcutField(current, caption + "快捷键");
             Theme.Put(panel, Theme.Field(box), 1, slot, new Padding(0, 0, 10, 6));
             Keys candidate = current;
-            box.KeyDown += delegate(object sender, KeyEventArgs args)
-            {
-                if (!Hotkeys.Valid(args.KeyData)) return;
-                args.SuppressKeyPress = true;
-                candidate = args.KeyData;
-                box.Text = Hotkeys.Display(candidate);
-            };
+            box.Recorded += chord => candidate = chord;
             var apply = Theme.Button("保存");
             Theme.Put(panel, apply, 2, slot, new Padding(0, 0, 0, 6));
             apply.Click += delegate
             {
+                if (quickText.Entries.Any(entry => entry.Chord == candidate))
+                {
+                    SetMessage("这组快捷键已分配给一条快捷文本。");
+                    return;
+                }
                 SetMessage(hotkeys.Set(shortcut, candidate, Path.Combine(folder, file)) ?? caption + "的快捷键已保存。");
             };
             box.Enter += delegate { SetMessage("按下新组合键，再点保存。"); };
@@ -386,7 +432,7 @@ namespace KeyParcel
             catch (UnauthorizedAccessException) { SetMessage("字符间隔已生效，写入设置失败。"); }
         }
 
-        private void Trigger(PasteShortcut shortcut)
+        private void Trigger(string shortcut)
         {
             if (input == null) return;
             if (shortcut == PasteShortcut.Resume)
@@ -400,13 +446,63 @@ namespace KeyParcel
                 OwnedForms.Any(form => form.IsHandleCreated && form.Handle == window)) return;
             try
             {
-                string text = (shortcut == PasteShortcut.Phone ? inbox.Latest : null) ?? Clipboard.GetText();
+                string text;
+                if (shortcut == PasteShortcut.Phone || shortcut == PasteShortcut.Clipboard)
+                    text = (shortcut == PasteShortcut.Phone ? inbox.Latest : null) ?? Clipboard.GetText();
+                else
+                {
+                    var entry = quickText.Entries.FirstOrDefault(item => item.ShortcutId == shortcut);
+                    if (!quickText.Enabled || entry == null) return;
+                    text = entry.Text;
+                }
                 input.Begin(shortcut, text, Decimal.ToInt32(delay.Value), window);
             }
             catch (System.Runtime.InteropServices.ExternalException)
             {
                 SetMessage("剪贴板暂时被占用，请再按一次。");
             }
+        }
+
+        private void OpenQuickText()
+        {
+            ClearQuickBindings();
+            hotkeys.Suspend();
+            try
+            {
+                using (var dialog = new QuickTextWindow(quickText, chord => hotkeys.CanRegister(chord)))
+                    dialog.ShowDialog(this);
+            }
+            finally
+            {
+                int conflicts = hotkeys.Restore();
+                RefreshQuickBindings();
+                if (conflicts > 0) SetMessage("部分全局快捷键已被占用，请重新保存或修改。");
+            }
+        }
+
+        private void ClearQuickBindings()
+        {
+            foreach (string shortcut in quickBindings) hotkeys.Remove(shortcut);
+            quickBindings.Clear();
+        }
+
+        private void RefreshQuickBindings()
+        {
+            ClearQuickBindings();
+            if (!quickText.Enabled)
+            {
+                quickTextState.Text = "快捷文本已关闭";
+                return;
+            }
+            int conflicts = 0;
+            foreach (var entry in quickText.Entries)
+            {
+                if (entry.Chord == Keys.None || String.IsNullOrEmpty(entry.Text)) continue;
+                if (hotkeys.Set(entry.ShortcutId, entry.Chord) == null) quickBindings.Add(entry.ShortcutId);
+                else conflicts++;
+            }
+            quickTextState.Text = "快捷文本已启用 · " + quickBindings.Count + " 条可用" +
+                (conflicts == 0 ? "" : " · " + conflicts + " 组按键被占用");
         }
 
         private void SetMessage(string value) { message.Text = value; }

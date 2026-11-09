@@ -1,12 +1,17 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace KeyParcel
 {
-    internal enum PasteShortcut { Phone, Clipboard, Resume }
+    internal static class PasteShortcut
+    {
+        internal const string Phone = "phone", Clipboard = "clipboard", Resume = "resume";
+    }
 
     internal sealed class Hotkeys : NativeWindow, IDisposable
     {
@@ -15,28 +20,25 @@ namespace KeyParcel
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr window, int id);
 
-        private readonly int[] ids = new int[3];
-        private readonly Keys[] keys = new Keys[3];
-        private readonly Action<PasteShortcut> pressed;
+        private sealed class Binding { internal Keys Chord; internal int Id; }
+        private readonly Dictionary<string, Binding> bindings = new Dictionary<string, Binding>();
+        private readonly Action<string> pressed;
+        private const int ProbeId = 0xbfff;
+        private int nextId = 1;
 
-        internal Hotkeys(Action<PasteShortcut> pressed)
+        internal Hotkeys(Action<string> pressed)
         {
             this.pressed = pressed;
             CreateHandle(new CreateParams { Parent = new IntPtr(-3) });
         }
 
-        internal string Set(PasteShortcut shortcut, Keys chord, string savePath = null)
+        internal string Set(string shortcut, Keys chord, string savePath = null)
         {
-            int slot = (int)shortcut;
             if (!Valid(chord)) return "请用 Ctrl、Alt 或 Shift 搭配字母、数字或功能键。Ctrl + V 留给系统。";
-            if (keys[slot] == chord) return null;
-            uint mods = 0x4000; // MOD_NOREPEAT
-            if ((chord & Keys.Alt) != 0) mods |= 1;
-            if ((chord & Keys.Control) != 0) mods |= 2;
-            if ((chord & Keys.Shift) != 0) mods |= 4;
-            int firstId = 1 + slot * 2;
-            int next = ids[slot] == firstId ? firstId + 1 : firstId;
-            if (!RegisterHotKey(Handle, next, mods, (uint)(chord & Keys.KeyCode)))
+            Binding existing;
+            if (bindings.TryGetValue(shortcut, out existing) && existing.Chord == chord && existing.Id != 0) return null;
+            int id = InUse(chord, shortcut) ? 0 : Register(chord);
+            if (id == 0)
                 return "快捷键已被占用。请录制另一组。";
             try
             {
@@ -45,18 +47,83 @@ namespace KeyParcel
             }
             catch (IOException)
             {
-                UnregisterHotKey(Handle, next);
+                UnregisterHotKey(Handle, id);
                 return "无法保存设置。请检查用户设置目录。";
             }
             catch (UnauthorizedAccessException)
             {
-                UnregisterHotKey(Handle, next);
+                UnregisterHotKey(Handle, id);
                 return "无法保存设置。请检查用户设置目录。";
             }
-            if (ids[slot] != 0) UnregisterHotKey(Handle, ids[slot]);
-            keys[slot] = chord;
-            ids[slot] = next;
+            Remove(shortcut);
+            bindings[shortcut] = new Binding { Chord = chord, Id = id };
             return null;
+        }
+
+        internal bool InUse(Keys chord, string except = null)
+        {
+            return bindings.Any(item => item.Key != except && item.Value.Chord == chord);
+        }
+
+        internal bool CanRegister(Keys chord, string except = null)
+        {
+            if (!Valid(chord) || InUse(chord, except)) return false;
+            Binding existing;
+            if (except != null && bindings.TryGetValue(except, out existing) &&
+                existing.Id != 0 && existing.Chord == chord) return true;
+            if (!RegisterHotKey(Handle, ProbeId, Modifiers(chord), (uint)(chord & Keys.KeyCode))) return false;
+            UnregisterHotKey(Handle, ProbeId);
+            return true;
+        }
+
+        internal void Remove(string shortcut)
+        {
+            Binding binding;
+            if (!bindings.TryGetValue(shortcut, out binding)) return;
+            if (binding.Id != 0) UnregisterHotKey(Handle, binding.Id);
+            bindings.Remove(shortcut);
+        }
+
+        internal void Suspend()
+        {
+            foreach (var binding in bindings.Values)
+            {
+                if (binding.Id != 0) UnregisterHotKey(Handle, binding.Id);
+                binding.Id = 0;
+            }
+        }
+
+        internal int Restore()
+        {
+            int failed = 0;
+            foreach (var binding in bindings.Values)
+            {
+                if (binding.Id != 0) continue;
+                binding.Id = Register(binding.Chord);
+                if (binding.Id == 0) failed++;
+            }
+            return failed;
+        }
+
+        private int Register(Keys chord)
+        {
+            for (int attempt = 0; attempt < ProbeId - 1; attempt++)
+            {
+                int id = nextId++;
+                if (nextId == ProbeId) nextId = 1;
+                if (bindings.Values.Any(binding => binding.Id == id)) continue;
+                return RegisterHotKey(Handle, id, Modifiers(chord), (uint)(chord & Keys.KeyCode)) ? id : 0;
+            }
+            return 0;
+        }
+
+        private static uint Modifiers(Keys chord)
+        {
+            uint mods = 0x4000; // MOD_NOREPEAT
+            if ((chord & Keys.Alt) != 0) mods |= 1;
+            if ((chord & Keys.Control) != 0) mods |= 2;
+            if ((chord & Keys.Shift) != 0) mods |= 4;
+            return mods;
         }
 
         internal static bool Valid(Keys chord)
@@ -69,6 +136,7 @@ namespace KeyParcel
 
         internal static string Display(Keys chord)
         {
+            if (chord == Keys.None) return "未分配";
             Keys key = chord & Keys.KeyCode;
             return ((chord & Keys.Control) != 0 ? "Ctrl + " : "") +
                 ((chord & Keys.Alt) != 0 ? "Alt + " : "") +
@@ -79,19 +147,21 @@ namespace KeyParcel
         protected override void WndProc(ref Message message)
         {
             if (message.Msg == 0x0312)
-                for (int i = 0; i < ids.Length; i++)
-                    if (ids[i] != 0 && message.WParam.ToInt32() == ids[i])
-                    {
-                        pressed((PasteShortcut)i);
-                        return;
-                    }
+            {
+                int id = message.WParam.ToInt32();
+                if (id != 0)
+                {
+                    string shortcut = bindings.FirstOrDefault(item => item.Value.Id == id).Key;
+                    if (shortcut != null) { pressed(shortcut); return; }
+                }
+            }
             base.WndProc(ref message);
         }
 
         public void Dispose()
         {
             if (Handle == IntPtr.Zero) return;
-            foreach (int id in ids) if (id != 0) UnregisterHotKey(Handle, id);
+            Suspend();
             DestroyHandle();
         }
     }
@@ -105,7 +175,7 @@ namespace KeyParcel
         private string pending;
         private IntPtr target;
         private int position, interval;
-        private PasteShortcut source;
+        private string source;
         private bool running;
 
         internal PacedInput(Action<string> status, Func<IntPtr> foreground, Action<string> send)
@@ -116,7 +186,7 @@ namespace KeyParcel
             timer.Tick += Tick;
         }
 
-        internal bool Begin(PasteShortcut shortcut, string text, int delay, IntPtr window)
+        internal bool Begin(string shortcut, string text, int delay, IntPtr window)
         {
             if (running || String.IsNullOrEmpty(text) || window == IntPtr.Zero) return false;
             target = window;
@@ -128,7 +198,7 @@ namespace KeyParcel
             return true;
         }
 
-        internal bool HandleRunningPasteShortcut(PasteShortcut shortcut)
+        internal bool HandleRunningPasteShortcut(string shortcut)
         {
             if (!running) return false;
             if (shortcut == source) Pause("已暂停。按「继续粘贴」从原位置接着输入。");
