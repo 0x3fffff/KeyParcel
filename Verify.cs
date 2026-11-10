@@ -10,6 +10,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace KeyParcel
@@ -62,8 +63,71 @@ namespace KeyParcel
             using (var preferred = new MobileServer(IPAddress.Loopback, testPort, inbox))
                 Require(preferred.ListeningPort == testPort, "A free preferred port was not used.");
             VerifyInput();
+            VerifyInputModes();
             VerifyShortcutRecording();
             VerifyQuickText(work);
+        }
+
+        private sealed class TestKeyboard : IVirtualKeyboard
+        {
+            public bool IsReady { get; set; }
+            public bool NeedsInstallConfirmation { get; set; }
+            internal bool CanStart;
+            internal int SetupCalls;
+            internal readonly List<string> Units = new List<string>();
+            public Task<string> Start()
+            {
+                SetupCalls++;
+                IsReady = CanStart;
+                return Task.FromResult(IsReady ? null : "Driver unavailable.");
+            }
+            public void Send(IntPtr window, string unit) { Units.Add(unit); }
+            public void Close() { IsReady = false; }
+            public void Dispose() { }
+        }
+
+        private static void VerifyInputModes()
+        {
+            var unavailable = new InputModes(null);
+            Require(unavailable.Toggle(() => { throw new InvalidOperationException("No package to install."); }).Result != null &&
+                !unavailable.Virtual, "The portable build advertised a missing driver as ready.");
+
+            var driver = new TestKeyboard { NeedsInstallConfirmation = true };
+            var modes = new InputModes(driver);
+            var window = new IntPtr(1);
+            Action<string> send;
+            Require(modes.Prepare("中文🙂", window, out send) == null && send == null && driver.SetupCalls == 0,
+                "Default input is no longer Unicode simulation.");
+            Require(modes.Toggle(() => false).Result != null && !modes.Virtual && driver.SetupCalls == 0,
+                "Declining the install changed input mode.");
+            Require(modes.Toggle(() => true).Result != null && !modes.Virtual && driver.SetupCalls == 1,
+                "A failed startup changed input mode.");
+            driver.CanStart = true;
+            Require(modes.Toggle(() => true).Result == null && modes.Virtual && driver.SetupCalls == 2,
+                "A successful startup did not enable virtual mode.");
+
+            foreach (string invalid in new[] { "A中", "A🙂", "A。", "A\t", "A\u007f" })
+                Require(modes.Prepare(invalid, window, out send) != null && send == null && driver.Units.Count == 0,
+                    "Unsupported text was accepted in virtual mode.");
+            string text = "Az09 !?\r\n";
+            Require(modes.Prepare(text, window, out send) == null && send != null,
+                "Supported text was rejected in virtual mode.");
+            using (var pace = new PacedInput(_ => { }, () => window,
+                _ => { throw new InvalidOperationException("Virtual input fell back to simulation."); }))
+            {
+                Require(pace.Begin(PasteShortcut.Phone, text, 0, window, send), "Virtual input did not start.");
+                Pump(() => driver.Units.Count == 8, 1800);
+                Require(String.Concat(driver.Units) == "Az09 !?\n", "Virtual input was not routed or paced correctly.");
+                Require(pace.Begin(PasteShortcut.Phone, "next", 0, window, send) && pace.Discard() && !pace.Resume(),
+                    "Switching input modes could resume a previous job.");
+            }
+            driver.IsReady = false;
+            Require(modes.Prepare(text, window, out send) != null && send == null,
+                "The unavailable virtual keyboard silently fell back to simulation.");
+            Require(modes.Toggle(() => false).Result == null && !modes.Virtual, "Could not switch to simulation.");
+            driver.NeedsInstallConfirmation = false;
+            Require(modes.Toggle(() => { throw new InvalidOperationException("Installed driver prompted for setup again."); }).Result == null &&
+                modes.Virtual && driver.SetupCalls == 3, "Installed driver could not restart without the setup dialog.");
         }
 
         private static void VerifyQuickText(string work)

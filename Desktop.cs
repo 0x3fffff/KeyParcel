@@ -29,7 +29,7 @@ namespace KeyParcel
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KeyParcel");
-            Application.Run(new ParcelWindow(folder));
+            Application.Run(new ParcelWindow(folder, MaestroKeyboard.Create()));
         }
     }
 
@@ -306,19 +306,23 @@ namespace KeyParcel
         private readonly QuickTextStore quickText;
         private readonly Hotkeys hotkeys;
         private readonly PacedInput input;
+        private readonly InputModes inputModes;
         private readonly NumericUpDown delay;
-        private readonly Label state, message, quickTextState;
+        private readonly Label state, message, quickTextState, inputModeState;
         private readonly List<string> quickBindings = new List<string>();
         private readonly Timer refresh = new Timer { Interval = 400 };
+        private readonly Timer inputNoticeTimer = new Timer { Interval = 5000 };
+        private NotifyIcon inputNotice;
         private MobileServer receiver;
         private IPAddress lastAddress;
 
-        internal ParcelWindow(string folder)
+        internal ParcelWindow(string folder, IVirtualKeyboard virtualKeyboard = null)
         {
             this.folder = folder;
             inbox = new MobileInbox(folder);
             quickText = new QuickTextStore(folder);
-            Theme.Window(this, "KeyParcel", 516, 514);
+            inputModes = new InputModes(virtualKeyboard);
+            Theme.Window(this, "KeyParcel", 516, 560);
             var root = Theme.Table(0);
             root.Padding = new Padding(24, 19, 24, 12);
             Controls.Add(root);
@@ -357,9 +361,24 @@ namespace KeyParcel
             Theme.Put(quickRow, manage, 1, 0, Padding.Empty);
             Theme.Put(root, quickRow, 0, 3, new Padding(0, 0, 0, 15));
 
-            Theme.Put(root, Theme.Label("全局快捷键", Theme.Section, Theme.Ink), 0, 4, new Padding(0, 0, 0, 8));
+            var modeRow = Theme.Table(0, -1);
+            inputModeState = Theme.Label("输入方式：模拟输入", Theme.Body, Theme.Muted);
+            inputModeState.Name = "InputModeState";
+            Theme.Put(modeRow, inputModeState, 0, 0, new Padding(0, 0, 8, 0));
+            var switchMode = Theme.Button("切换输入方式");
+            switchMode.Name = "SwitchInputMode";
+            switchMode.Click += async delegate
+            {
+                switchMode.Enabled = false;
+                try { await SwitchInputMode(); }
+                finally { if (!switchMode.IsDisposed) switchMode.Enabled = true; }
+            };
+            Theme.Put(modeRow, switchMode, 1, 0, Padding.Empty);
+            Theme.Put(root, modeRow, 0, 4, new Padding(0, 0, 0, 15));
+
+            Theme.Put(root, Theme.Label("全局快捷键", Theme.Section, Theme.Ink), 0, 5, new Padding(0, 0, 0, 8));
             var shortcuts = Theme.Table(126, 0, -1);
-            Theme.Put(root, shortcuts, 0, 5, new Padding(0, 0, 0, 12));
+            Theme.Put(root, shortcuts, 0, 6, new Padding(0, 0, 0, 12));
             message = Theme.Label("点击快捷键输入框可录制新组合键。", Theme.Small, Theme.Muted);
             hotkeys = new Hotkeys(Trigger);
             AddShortcut(shortcuts, 0, PasteShortcut.Phone, "手机文字优先", Keys.Control | Keys.Shift | Keys.V);
@@ -367,7 +386,7 @@ namespace KeyParcel
             AddShortcut(shortcuts, 2, PasteShortcut.Resume, "继续粘贴", Keys.Control | Keys.Alt | Keys.Shift | Keys.V);
 
             var pacing = Theme.Table(-1, 0, 82, -1);
-            Theme.Put(root, pacing, 0, 6, new Padding(0, 1, 0, 8));
+            Theme.Put(root, pacing, 0, 7, new Padding(0, 1, 0, 8));
             Theme.Put(pacing, Theme.Label("字符间隔", Theme.Section, Theme.Ink), 0, 0, new Padding(0, 0, 12, 0));
             Theme.Put(pacing, Theme.Label("0 表示最快", Theme.Small, Theme.Muted), 1, 0, Padding.Empty);
             delay = new NumericUpDown { Name = "CharacterInterval", AccessibleName = "字符间隔（毫秒）",
@@ -377,9 +396,18 @@ namespace KeyParcel
             Theme.Put(pacing, Theme.Label("毫秒", Theme.Small, Theme.Muted), 3, 0, new Padding(8, 0, 0, 0));
             delay.ValueChanged += delegate { SaveDelay(); };
 
-            Theme.Put(root, message, 0, 7, new Padding(0, 6, 0, 5));
-            Theme.Put(root, Theme.AuthorLink(SetMessage), 0, 8, new Padding(0, 10, 0, 0));
-            input = new PacedInput(SetMessage, WindowsKeyboard.GetForegroundWindow, WindowsKeyboard.Send);
+            Theme.Put(root, message, 0, 8, new Padding(0, 6, 0, 5));
+            Theme.Put(root, Theme.AuthorLink(SetMessage), 0, 9, new Padding(0, 10, 0, 0));
+            input = new PacedInput(value =>
+            {
+                if (value.StartsWith("输入失败。", StringComparison.Ordinal)) ReportInputProblem(value);
+                else SetMessage(value);
+            }, WindowsKeyboard.GetForegroundWindow, WindowsKeyboard.Send);
+            inputNoticeTimer.Tick += delegate
+            {
+                inputNoticeTimer.Stop();
+                if (inputNotice != null) inputNotice.Visible = false;
+            };
             RefreshQuickBindings();
             refresh.Tick += delegate { RefreshState(); };
             RefreshState();
@@ -432,6 +460,21 @@ namespace KeyParcel
             catch (UnauthorizedAccessException) { SetMessage("字符间隔已生效，写入设置失败。"); }
         }
 
+        private async System.Threading.Tasks.Task SwitchInputMode()
+        {
+            string error = await inputModes.Toggle(() => MessageBox.Show(this,
+                "免费虚拟键盘需要管理员授权。首次启用时，助手会安装 HIDMaestro 驱动并信任它的本机签名证书。继续吗？",
+                "KeyParcel · 虚拟键盘",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes);
+            if (IsDisposed || Disposing) return;
+            if (error != null) { SetMessage(error); return; }
+            string mode = inputModes.Virtual ? "虚拟键盘" : "模拟输入";
+            inputModeState.Text = "输入方式：" + mode;
+            bool discarded = input.Discard();
+            SetMessage(discarded ? "已切换，上一轮输入已结束。" : inputModes.Virtual
+                ? "虚拟键盘已就绪。请在目标窗口使用美式键盘和半角文字。" : "已切换到模拟输入。");
+        }
+
         private void Trigger(string shortcut)
         {
             if (input == null) return;
@@ -443,7 +486,11 @@ namespace KeyParcel
             if (input.HandleRunningPasteShortcut(shortcut)) return;
             var window = WindowsKeyboard.GetForegroundWindow();
             if (window == IntPtr.Zero || window == Handle ||
-                OwnedForms.Any(form => form.IsHandleCreated && form.Handle == window)) return;
+                OwnedForms.Any(form => form.IsHandleCreated && form.Handle == window))
+            {
+                if (inputModes.Virtual) SetMessage("请先把光标放到目标应用的输入框，再按快捷键。");
+                return;
+            }
             try
             {
                 string text;
@@ -455,7 +502,15 @@ namespace KeyParcel
                     if (!quickText.Enabled || entry == null) return;
                     text = entry.Text;
                 }
-                input.Begin(shortcut, text, Decimal.ToInt32(delay.Value), window);
+                if (String.IsNullOrEmpty(text))
+                {
+                    if (inputModes.Virtual) ReportInputProblem("没有可输入的文字。请先复制或发送一段文字。");
+                    return;
+                }
+                Action<string> send;
+                string error = inputModes.Prepare(text, window, out send);
+                if (error != null) { ReportInputProblem(error); return; }
+                input.Begin(shortcut, text, Decimal.ToInt32(delay.Value), window, send);
             }
             catch (System.Runtime.InteropServices.ExternalException)
             {
@@ -507,6 +562,17 @@ namespace KeyParcel
 
         private void SetMessage(string value) { message.Text = value; }
 
+        private void ReportInputProblem(string value)
+        {
+            SetMessage(value);
+            if (!inputModes.Virtual || ContainsFocus) return;
+            if (inputNotice == null) inputNotice = new NotifyIcon { Icon = Icon, Text = "KeyParcel" };
+            inputNotice.Visible = true;
+            inputNotice.ShowBalloonTip(5000, "KeyParcel · 虚拟键盘", value, ToolTipIcon.Warning);
+            inputNoticeTimer.Stop();
+            inputNoticeTimer.Start();
+        }
+
         private void StartReceiver(IPAddress ip)
         {
             receiver = new MobileServer(ip, MobileServer.PreferredPort, inbox);
@@ -532,9 +598,12 @@ namespace KeyParcel
             if (disposing)
             {
                 refresh.Dispose();
+                inputNoticeTimer.Dispose();
+                if (inputNotice != null) inputNotice.Dispose();
                 StopReceiver();
                 if (hotkeys != null) hotkeys.Dispose();
                 if (input != null) input.Dispose();
+                if (inputModes != null) inputModes.Dispose();
             }
             base.Dispose(disposing);
         }

@@ -7,7 +7,7 @@ if (!(Test-Path -LiteralPath $compiler)) {
 }
 $page = Join-Path $PSScriptRoot 'Phone.html'
 $exe = Join-Path $folder 'Verify.exe'
-$sources = 'Desktop.cs','WindowsInput.cs','MobileQr.cs','MobileServer.cs','QuickText.cs','Verify.cs' |
+$sources = 'Desktop.cs','WindowsInput.cs','InputModes.cs','MaestroKeyboard.cs','MobileQr.cs','MobileServer.cs','QuickText.cs','Verify.cs' |
     ForEach-Object { Join-Path $PSScriptRoot $_ }
 $arguments = @('/nologo', '/main:KeyParcel.Verify', '/codepage:65001', "/out:$exe",
     "/resource:$page,KeyParcel.Phone.html", '/reference:System.Windows.Forms.dll',

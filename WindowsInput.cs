@@ -171,7 +171,8 @@ namespace KeyParcel
         private readonly Timer timer = new Timer();
         private readonly Action<string> status;
         private readonly Func<IntPtr> foreground;
-        private readonly Action<string> send;
+        private readonly Action<string> defaultSend;
+        private Action<string> send;
         private string pending;
         private IntPtr target;
         private int position, interval;
@@ -182,13 +183,14 @@ namespace KeyParcel
         {
             this.status = status;
             this.foreground = foreground;
-            this.send = send;
+            defaultSend = send;
             timer.Tick += Tick;
         }
 
-        internal bool Begin(string shortcut, string text, int delay, IntPtr window)
+        internal bool Begin(string shortcut, string text, int delay, IntPtr window, Action<string> sendOverride = null)
         {
             if (running || String.IsNullOrEmpty(text) || window == IntPtr.Zero) return false;
+            send = sendOverride ?? defaultSend;
             target = window;
             source = shortcut;
             pending = text;
@@ -239,9 +241,19 @@ namespace KeyParcel
 
         private void Finish(string message)
         {
+            Discard();
+            status(message);
+        }
+
+        internal bool Discard()
+        {
+            bool hadPending = pending != null;
+            timer.Stop();
+            running = false;
             pending = null;
+            send = null;
             target = IntPtr.Zero;
-            Pause(message);
+            return hadPending;
         }
 
         private void Tick(object sender, EventArgs args)
