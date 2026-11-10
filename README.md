@@ -28,12 +28,14 @@ Windows 局域网文字接力工具。手机打开网页发送文字，电脑按
 
 带虚拟键盘组件的版本默认使用模拟输入。点击「切换输入方式」后，Windows 会询问是否授权独立的键盘助手。助手使用免费的 [HIDMaestro](https://github.com/hifihedgehog/HIDMaestro)，首次启用时会说明如何安装驱动并信任本机签名证书。检测到驱动已安装后，只显示 Windows 的管理员授权。切回模拟输入或退出 KeyParcel 会释放虚拟键盘。
 
-虚拟键盘支持美式键盘布局下的英文字母、数字、半角标点和换行，包括「中文（简体）＋美式键盘」组合。在目标窗口按 `Win + 空格` 可以选择键盘布局。中文和表情请使用模拟输入。
+虚拟键盘支持美式键盘布局下的英文字母、数字、半角标点和换行，包括「中文（简体）＋美式键盘」组合。在虚拟键盘模式下，尚未部署中文扩展时会显示「安装中文输入」。该按钮可安装小狼毫并导入 [中文扩展](Rime/安装说明.md)，已有小狼毫时会直接导入。部署一次后，KeyParcel 在输入前尝试临时启用小狼毫，并在完成或暂停时恢复原输入法。小狼毫现有的拼音方案会保留。
 
 ## 构建
 
-在 Windows PowerShell 或 PowerShell 7 中运行 `./Build.ps1`。生成 `dist/1.4.1/KeyParcel.exe`。构建使用 Windows 本机的 .NET Framework 编译器。手机网页和应用图标内嵌在 EXE 中。
+在 Windows PowerShell 或 PowerShell 7 中运行 `./Build.ps1`。生成 `dist/1.5.0/KeyParcel.exe`。构建使用 Windows 本机的 .NET Framework 编译器。手机网页和应用图标内嵌在 EXE 中。
 
 构建带免费虚拟键盘的 x64 版需要 .NET 10 SDK。解压 [HIDMaestro v2.1.0 的 x64 发布包](https://github.com/hifihedgehog/HIDMaestro/releases/tag/v2.1.0)，再用 `./Build.ps1 -HIDMaestroSource <解压目录> -Output ./build/virtual-keyboard-free-preview/KeyParcel.exe` 构建。把输出目录中的 `keyboard` 整个文件夹随 EXE 分发，运行时已打包在内。
+
+如需一起打包小狼毫，可向构建命令添加 `-WeaselInstaller <官方 0.17.4 安装包路径>`。也可以把 `weasel-0.17.4.0-installer.exe` 放到 KeyParcel 旁的 `Rime` 文件夹。启动安装前会校验官方 SHA-256。
 
 配置保存在 `%LOCALAPPDATA%/KeyParcel`，退出应用并删除该目录可清除配对和个人设置。

@@ -62,7 +62,8 @@ internal static partial class Program
                 catch (EndOfStreamException) { return 0; }
                 if (caller.HasExited) return 0;
                 var character = (char)input.ReadUInt16();
-                var result = CheckTarget(new IntPtr(target));
+                bool rimeKey = character is >= '\uE000' and <= '\uE00B';
+                var result = CheckTarget(new IntPtr(target), rimeKey);
                 if (result == 1 && TryMap(character, (GetKeyState(0x14) & 1) != 0, out var key, out var shift))
                 {
                     try { keyboard.SubmitKeyboard(shift ? HMKeyModifiers.LeftShift : HMKeyModifiers.None, [key]); }
@@ -75,7 +76,7 @@ internal static partial class Program
         catch (Exception) { return 1; }
     }
 
-    private static byte CheckTarget(IntPtr window)
+    private static byte CheckTarget(IntPtr window, bool rimeKey)
     {
         if (window == IntPtr.Zero || GetForegroundWindow() != window) return 0;
         var thread = GetWindowThreadProcessId(window, out var pid);
@@ -94,7 +95,7 @@ internal static partial class Program
             finally { CloseHandle(token); }
         }
         finally { CloseHandle(process); }
-        if (!IsUsKeyboardLayout(unchecked((uint)GetKeyboardLayout(thread).ToInt64()))) return 2;
+        if (!rimeKey && !IsUsKeyboardLayout(unchecked((uint)GetKeyboardLayout(thread).ToInt64()))) return 2;
         foreach (var modifier in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
             if ((GetAsyncKeyState(modifier) & 0x8000) != 0) return 3;
         return GetForegroundWindow() == window ? (byte)1 : (byte)0;
@@ -106,6 +107,11 @@ internal static partial class Program
     private static bool TryMap(char ch, bool caps, out HMKey key, out bool shift)
     {
         shift = false;
+        if (ch is >= '\uE000' and <= '\uE00B')
+        {
+            key = (HMKey)(0x68 + ch - '\uE000');
+            return true;
+        }
         if (ch is >= 'a' and <= 'z' or >= 'A' and <= 'Z')
         {
             shift = char.IsUpper(ch) != caps;

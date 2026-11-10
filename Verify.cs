@@ -43,7 +43,7 @@ namespace KeyParcel
             Application.SetCompatibleTextRenderingDefault(false);
             string work = args[0];
             var inbox = new MobileInbox(work);
-            CheckLayouts(() => new ParcelWindow(work), work, "desktop", form =>
+            CheckLayouts(() => new ParcelWindow(work, new TestKeyboard()), work, "desktop", form =>
             {
                 var button = form.Controls.Find("ConnectPhone", true).Single();
                 var summary = button.Parent.Controls.OfType<TableLayoutPanel>().Single();
@@ -64,8 +64,43 @@ namespace KeyParcel
                 Require(preferred.ListeningPort == testPort, "A free preferred port was not used.");
             VerifyInput();
             VerifyInputModes();
+            VerifyRimeImport(work);
             VerifyShortcutRecording();
             VerifyQuickText(work);
+        }
+
+        private static void VerifyRimeImport(string work)
+        {
+            var schemes = RimeSetup.EnabledSchemes("schema_list:\r\n  - schema: luna_pinyin_simp\r\n  - schema: luna_pinyin\r\nother:\r\n  - schema: ignored\r\n");
+            Require(schemes.SequenceEqual(new[] { "luna_pinyin_simp", "luna_pinyin" }), "Import did not isolate enabled Rime schemes.");
+            string existing = "customization:\r\n  version: 1\r\npatch: # my options\r\n  \"menu/page_size\": 7\r\n";
+            string patched, repeated;
+            const string insertion = "  \"engine/processors/@before 0\": lua_processor@*keyparcel_input\r\n";
+            Require(RimeSetup.TryAddProcessor(existing, out patched) && patched.Replace(insertion, "") == existing,
+                "Import changed unrelated user settings or line endings.");
+            Require(RimeSetup.TryAddProcessor(patched, out repeated) && repeated == patched,
+                "Repeated import duplicated the processor.");
+            Require(!RimeSetup.TryAddProcessor("patch: {foo: 1}", out patched) &&
+                !RimeSetup.TryAddProcessor("patch:\n  engine/processors/@before 0: other\n", out patched),
+                "Import rewrote a custom patch it could not safely merge.");
+            Require(RimeSetup.TryAddProcessor("", out patched) && patched.StartsWith("patch:\n"),
+                "Import could not prepare a new schema patch.");
+
+            string rime = Path.Combine(work, "rime-status");
+            MobileInbox.SaveSetting(Path.Combine(rime, "lua", "keyparcel_input.lua"), "return {}\n");
+            MobileInbox.SaveSetting(Path.Combine(rime, "build", "default.yaml"), "schema_list:\n  - schema: stroke\n");
+            Require(!RimeSetup.HasDeployedExtension(rime), "Setup was marked complete before the processor was deployed.");
+            MobileInbox.SaveSetting(Path.Combine(rime, "build", "stroke.schema.yaml"),
+                "engine:\n  processors:\n    - \"lua_processor@*keyparcel_input\"\n");
+            Require(RimeSetup.HasDeployedExtension(rime), "The deployed extension was not detected.");
+
+            string reply = Path.Combine(work, "rime-test-reply.txt");
+            File.WriteAllText(reply, "sample:3");
+            using (File.Open(reply, FileMode.Open, FileAccess.Write, FileShare.Read))
+            {
+                Require(RimeInput.ConfirmationReceived(reply, "sample:3"), "The reply could not be read while Rime had it open for writing.");
+                Require(!RimeInput.ConfirmationReceived(reply, "sample:4"), "An older reply was accepted for the next character.");
+            }
         }
 
         private sealed class TestKeyboard : IVirtualKeyboard
@@ -96,7 +131,8 @@ namespace KeyParcel
             var modes = new InputModes(driver);
             var window = new IntPtr(1);
             Action<string> send;
-            Require(modes.Prepare("中文🙂", window, out send) == null && send == null && driver.SetupCalls == 0,
+            RimeInput rime;
+            Require(modes.Prepare("中文🙂", window, out send, out rime) == null && send == null && rime == null && driver.SetupCalls == 0,
                 "Default input is no longer Unicode simulation.");
             Require(modes.Toggle(() => false).Result != null && !modes.Virtual && driver.SetupCalls == 0,
                 "Declining the install changed input mode.");
@@ -107,10 +143,10 @@ namespace KeyParcel
                 "A successful startup did not enable virtual mode.");
 
             foreach (string invalid in new[] { "A中", "A🙂", "A。", "A\t", "A\u007f" })
-                Require(modes.Prepare(invalid, window, out send) != null && send == null && driver.Units.Count == 0,
+                Require(modes.Prepare(invalid, window, out send, out rime) != null && send == null && driver.Units.Count == 0,
                     "Unsupported text was accepted in virtual mode.");
             string text = "Az09 !?\r\n";
-            Require(modes.Prepare(text, window, out send) == null && send != null,
+            Require(modes.Prepare(text, window, out send, out rime) == null && send != null && rime == null,
                 "Supported text was rejected in virtual mode.");
             using (var pace = new PacedInput(_ => { }, () => window,
                 _ => { throw new InvalidOperationException("Virtual input fell back to simulation."); }))
@@ -122,12 +158,25 @@ namespace KeyParcel
                     "Switching input modes could resume a previous job.");
             }
             driver.IsReady = false;
-            Require(modes.Prepare(text, window, out send) != null && send == null,
+            Require(modes.Prepare(text, window, out send, out rime) != null && send == null,
                 "The unavailable virtual keyboard silently fell back to simulation.");
             Require(modes.Toggle(() => false).Result == null && !modes.Virtual, "Could not switch to simulation.");
             driver.NeedsInstallConfirmation = false;
             Require(modes.Toggle(() => { throw new InvalidOperationException("Installed driver prompted for setup again."); }).Result == null &&
                 modes.Virtual && driver.SetupCalls == 3, "Installed driver could not restart without the setup dialog.");
+            var unicodeModes = new InputModes(driver, ".");
+            Require(unicodeModes.Toggle(() => false).Result == null, "Virtual input is unavailable for Unicode preflight.");
+            Require(unicodeModes.Prepare("不会吧。不会吧 A1🙂", window, out send, out rime) == null && rime != null,
+                "Mixed Unicode was not routed to the Rime session.");
+            Require(unicodeModes.Prepare("中\ud800", window, out send, out rime) != null && send == null,
+                "An incomplete surrogate was accepted for virtual input.");
+            foreach (int scalar in new[] { 10, 'A', '。', '不', 0x20000, 0x1f642, 0x10ffff })
+            {
+                var keys = RimeInput.Encode(scalar);
+                Require(keys.Length == 6 && keys.All(key => key >= '\uE000' && key <= '\uE00A') &&
+                    keys.Aggregate(0, (value, key) => value * 11 + key - '\uE000') == scalar,
+                    "A Unicode scalar did not round trip through the virtual keyboard encoding.");
+            }
         }
 
         private static void VerifyQuickText(string work)

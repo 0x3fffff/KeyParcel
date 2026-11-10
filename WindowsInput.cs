@@ -173,6 +173,8 @@ namespace KeyParcel
         private readonly Func<IntPtr> foreground;
         private readonly Action<string> defaultSend;
         private Action<string> send;
+        private RimeInput rime;
+        private bool rimeStarted;
         private string pending;
         private IntPtr target;
         private int position, interval;
@@ -187,10 +189,11 @@ namespace KeyParcel
             timer.Tick += Tick;
         }
 
-        internal bool Begin(string shortcut, string text, int delay, IntPtr window, Action<string> sendOverride = null)
+        internal bool Begin(string shortcut, string text, int delay, IntPtr window, Action<string> sendOverride = null, RimeInput rimeInput = null)
         {
             if (running || String.IsNullOrEmpty(text) || window == IntPtr.Zero) return false;
             send = sendOverride ?? defaultSend;
+            rime = rimeInput;
             target = window;
             source = shortcut;
             pending = text;
@@ -236,13 +239,14 @@ namespace KeyParcel
         {
             timer.Stop();
             running = false;
-            status(message);
+            status(message + StopRime());
         }
 
         private void Finish(string message)
         {
+            string warning = StopRime();
             Discard();
-            status(message);
+            status(warning.Length == 0 ? message : "输入失败。" + warning);
         }
 
         internal bool Discard()
@@ -250,10 +254,21 @@ namespace KeyParcel
             bool hadPending = pending != null;
             timer.Stop();
             running = false;
+            string warning = StopRime();
+            if (warning.Length != 0) status("输入失败。" + warning);
             pending = null;
             send = null;
+            rime = null;
             target = IntPtr.Zero;
             return hadPending;
+        }
+
+        private string StopRime()
+        {
+            if (!rimeStarted) return "";
+            rimeStarted = false;
+            try { rime.Stop(); return ""; }
+            catch (Exception error) { return " " + error.Message; }
         }
 
         private void Tick(object sender, EventArgs args)
@@ -262,7 +277,12 @@ namespace KeyParcel
             if (!running) return;
             try
             {
-                int count = interval == 0 ? 128 : 1;
+                if (position == pending.Length)
+                {
+                    Finish("本次输入已完成。");
+                    return;
+                }
+                int count = interval == 0 && rime == null ? 128 : 1;
                 while (count-- > 0 && position < pending.Length)
                 {
                     if (foreground() != target)
@@ -270,26 +290,38 @@ namespace KeyParcel
                         Pause("已切换窗口，输入已暂停。回到原窗口后可继续。");
                         return;
                     }
-                    int start = position++;
+                    if (rime != null && !rimeStarted)
+                    {
+                        rimeStarted = true;
+                        rime.Start();
+                    }
+                    int start = position;
+                    int next = start + 1;
                     char c = pending[start];
                     if (c == '\r' || c == '\n')
                     {
-                        if (c == '\r' && position < pending.Length && pending[position] == '\n') position++;
+                        if (c == '\r' && next < pending.Length && pending[next] == '\n') next++;
                         send("\n");
                     }
                     else
                     {
-                        if (Char.IsHighSurrogate(c) && position < pending.Length && Char.IsLowSurrogate(pending[position]))
-                            position++;
-                        send(pending.Substring(start, position - start));
+                        if (Char.IsHighSurrogate(c) && next < pending.Length && Char.IsLowSurrogate(pending[next]))
+                            next++;
+                        send(pending.Substring(start, next - start));
                     }
+                    position = next;
                 }
-                if (position == pending.Length) Finish("本次输入已完成。");
+                if (position == pending.Length && rime == null) Finish("本次输入已完成。");
                 else
                 {
-                    timer.Interval = Math.Max(interval, 1);
+                    // The IME acknowledges composition before Windows inserts the final character.
+                    timer.Interval = position == pending.Length ? 50 : Math.Max(interval, 1);
                     timer.Start();
                 }
+            }
+            catch (RimeFocusLostException)
+            {
+                Pause("已切换窗口，输入已暂停。回到原窗口后可继续。");
             }
             catch (Exception ex)
             {
@@ -297,7 +329,7 @@ namespace KeyParcel
             }
         }
 
-        public void Dispose() { timer.Dispose(); }
+        public void Dispose() { Discard(); timer.Dispose(); }
     }
 
     internal static class WindowsKeyboard

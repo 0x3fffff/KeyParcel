@@ -17,7 +17,7 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("局域网文字接力")]
 [assembly: AssemblyCompany("0x3fffff")]
 [assembly: AssemblyCopyright("Copyright © 2026 0x3fffff")]
-[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyVersion("1.5.0.0")]
 
 namespace KeyParcel
 {
@@ -313,6 +313,8 @@ namespace KeyParcel
         private readonly Timer refresh = new Timer { Interval = 400 };
         private readonly Timer inputNoticeTimer = new Timer { Interval = 5000 };
         private NotifyIcon inputNotice;
+        private bool rimeSetupRunning;
+        private readonly Button installChinese;
         private MobileServer receiver;
         private IPAddress lastAddress;
 
@@ -321,7 +323,7 @@ namespace KeyParcel
             this.folder = folder;
             inbox = new MobileInbox(folder);
             quickText = new QuickTextStore(folder);
-            inputModes = new InputModes(virtualKeyboard);
+            inputModes = new InputModes(virtualKeyboard, folder);
             Theme.Window(this, "KeyParcel", 516, 560);
             var root = Theme.Table(0);
             root.Padding = new Padding(24, 19, 24, 12);
@@ -361,7 +363,7 @@ namespace KeyParcel
             Theme.Put(quickRow, manage, 1, 0, Padding.Empty);
             Theme.Put(root, quickRow, 0, 3, new Padding(0, 0, 0, 15));
 
-            var modeRow = Theme.Table(0, -1);
+            var modeRow = virtualKeyboard == null ? Theme.Table(0, -1) : Theme.Table(0, -1, -1);
             inputModeState = Theme.Label("输入方式：模拟输入", Theme.Body, Theme.Muted);
             inputModeState.Name = "InputModeState";
             Theme.Put(modeRow, inputModeState, 0, 0, new Padding(0, 0, 8, 0));
@@ -374,6 +376,20 @@ namespace KeyParcel
                 finally { if (!switchMode.IsDisposed) switchMode.Enabled = true; }
             };
             Theme.Put(modeRow, switchMode, 1, 0, Padding.Empty);
+            if (virtualKeyboard != null)
+            {
+                installChinese = Theme.Button("安装中文输入");
+                installChinese.Name = "InstallChineseInput";
+                installChinese.Visible = false;
+                installChinese.Click += async delegate
+                {
+                    if (!switchMode.Enabled) { SetMessage("请先完成虚拟键盘授权。"); return; }
+                    installChinese.Enabled = false;
+                    try { await SetupChineseInput(); }
+                    finally { if (!installChinese.IsDisposed) installChinese.Enabled = true; }
+                };
+                Theme.Put(modeRow, installChinese, 2, 0, new Padding(8, 0, 0, 0));
+            }
             Theme.Put(root, modeRow, 0, 4, new Padding(0, 0, 0, 15));
 
             Theme.Put(root, Theme.Label("全局快捷键", Theme.Section, Theme.Ink), 0, 5, new Padding(0, 0, 0, 8));
@@ -462,6 +478,7 @@ namespace KeyParcel
 
         private async System.Threading.Tasks.Task SwitchInputMode()
         {
+            if (rimeSetupRunning) { SetMessage("请等中文输入安装完成后再切换。"); return; }
             string error = await inputModes.Toggle(() => MessageBox.Show(this,
                 "免费虚拟键盘需要管理员授权。首次启用时，助手会安装 HIDMaestro 驱动并信任它的本机签名证书。继续吗？",
                 "KeyParcel · 虚拟键盘",
@@ -470,14 +487,61 @@ namespace KeyParcel
             if (error != null) { SetMessage(error); return; }
             string mode = inputModes.Virtual ? "虚拟键盘" : "模拟输入";
             inputModeState.Text = "输入方式：" + mode;
+            RefreshChineseSetupButton();
             bool discarded = input.Discard();
             SetMessage(discarded ? "已切换，上一轮输入已结束。" : inputModes.Virtual
-                ? "虚拟键盘已就绪。请在目标窗口使用美式键盘和半角文字。" : "已切换到模拟输入。");
+                ? "虚拟键盘已就绪。含中文的文字需部署小狼毫扩展。" : "已切换到模拟输入。");
+        }
+
+        private async System.Threading.Tasks.Task SetupChineseInput()
+        {
+            string package = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Rime", RimeSetup.InstallerName);
+            rimeSetupRunning = true;
+            input.Discard();
+            try
+            {
+                string deployer = RimeSetup.FindDeployer();
+                if (deployer == null)
+                {
+                    if (!File.Exists(package))
+                    {
+                        SetMessage("请将官方小狼毫安装包放到程序旁的 Rime 文件夹后重试。");
+                        return;
+                    }
+                    SetMessage("正在打开小狼毫安装程序。请在安装界面选「简体中文」。");
+                    int exit = await System.Threading.Tasks.Task.Run(() => RimeSetup.Install(package));
+                    if (IsDisposed || Disposing) return;
+                    deployer = RimeSetup.FindDeployer();
+                    if (exit != 0 || deployer == null)
+                    {
+                        SetMessage("小狼毫安装尚未完成。完成安装后可以再点一次。");
+                        return;
+                    }
+                }
+                SetMessage("正在导入中文扩展并重新部署小狼毫…");
+                int schemes = await System.Threading.Tasks.Task.Run(() => RimeSetup.Import(deployer));
+                if (!IsDisposed && !Disposing) SetMessage("中文扩展已导入 " + schemes + " 个方案。启用虚拟键盘即可试用。");
+            }
+            catch (Exception error)
+            {
+                if (!IsDisposed && !Disposing)
+                    MessageBox.Show(this, error.Message, "KeyParcel · 中文输入安装未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                rimeSetupRunning = false;
+                if (!IsDisposed && !Disposing) RefreshChineseSetupButton();
+            }
+        }
+
+        private void RefreshChineseSetupButton()
+        {
+            if (installChinese != null) installChinese.Visible = inputModes.Virtual && !RimeSetup.IsReady();
         }
 
         private void Trigger(string shortcut)
         {
-            if (input == null) return;
+            if (input == null || rimeSetupRunning) return;
             if (shortcut == PasteShortcut.Resume)
             {
                 input.Resume();
@@ -508,9 +572,10 @@ namespace KeyParcel
                     return;
                 }
                 Action<string> send;
-                string error = inputModes.Prepare(text, window, out send);
+                RimeInput rime;
+                string error = inputModes.Prepare(text, window, out send, out rime);
                 if (error != null) { ReportInputProblem(error); return; }
-                input.Begin(shortcut, text, Decimal.ToInt32(delay.Value), window, send);
+                input.Begin(shortcut, text, Decimal.ToInt32(delay.Value), window, send, rime);
             }
             catch (System.Runtime.InteropServices.ExternalException)
             {
